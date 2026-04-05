@@ -1426,3 +1426,172 @@ class TestDraftSetup:
             restored_chunk.draft_model.weight,
             owner_chunk.draft_model.weight,
         )
+
+
+@pytest.mark.mcore
+class TestCreateCheckpointConfigWithOverrides:
+    """Tests for _create_checkpoint_config with checkpointing_cfg parameter."""
+
+    def test_defaults_preserved_when_no_config(self, tmp_path):
+        """Test that default values are preserved when no checkpointing config is passed."""
+        from nemo_rl.models.megatron.setup import _create_checkpoint_config
+
+        pretrained_path = str(tmp_path / "pretrained")
+        weights_path = str(tmp_path / "weights")
+        optimizer_path = str(tmp_path / "optimizer")
+
+        checkpoint_config = _create_checkpoint_config(
+            pretrained_path, weights_path, optimizer_path
+        )
+
+        assert checkpoint_config.async_save is False
+        assert checkpoint_config.fully_parallel_save is True
+        assert checkpoint_config.fully_parallel_load is True
+        assert checkpoint_config.load_rng is False
+
+    def test_defaults_preserved_with_none_config(self, tmp_path):
+        """Test that default values are preserved when checkpointing_cfg is None."""
+        from nemo_rl.models.megatron.setup import _create_checkpoint_config
+
+        pretrained_path = str(tmp_path / "pretrained")
+        weights_path = str(tmp_path / "weights")
+
+        checkpoint_config = _create_checkpoint_config(
+            pretrained_path, weights_path, None, checkpointing_cfg=None
+        )
+
+        assert checkpoint_config.async_save is False
+        assert checkpoint_config.fully_parallel_save is True
+        assert checkpoint_config.fully_parallel_load is True
+        assert checkpoint_config.load_rng is False
+
+    def test_defaults_preserved_with_empty_config(self, tmp_path):
+        """Test that default values are preserved when checkpointing_cfg is empty dict."""
+        from nemo_rl.models.megatron.setup import _create_checkpoint_config
+
+        pretrained_path = str(tmp_path / "pretrained")
+        weights_path = str(tmp_path / "weights")
+
+        checkpoint_config = _create_checkpoint_config(
+            pretrained_path, weights_path, None, checkpointing_cfg={}
+        )
+
+        assert checkpoint_config.async_save is False
+        assert checkpoint_config.fully_parallel_save is True
+        assert checkpoint_config.fully_parallel_load is True
+        assert checkpoint_config.load_rng is False
+
+    def test_override_async_save(self, tmp_path):
+        """Test that async_save can be overridden via config."""
+        from nemo_rl.models.megatron.setup import _create_checkpoint_config
+
+        checkpoint_config = _create_checkpoint_config(
+            str(tmp_path / "pretrained"),
+            str(tmp_path / "weights"),
+            None,
+            checkpointing_cfg={"async_save": True},
+        )
+
+        assert checkpoint_config.async_save is True
+        # Other defaults unchanged
+        assert checkpoint_config.fully_parallel_save is True
+        assert checkpoint_config.fully_parallel_load is True
+        assert checkpoint_config.load_rng is False
+
+    def test_override_all_configurable_fields(self, tmp_path):
+        """Test that all configurable fields can be overridden."""
+        from nemo_rl.models.megatron.setup import _create_checkpoint_config
+
+        checkpoint_config = _create_checkpoint_config(
+            str(tmp_path / "pretrained"),
+            str(tmp_path / "weights"),
+            str(tmp_path / "optimizer"),
+            checkpointing_cfg={
+                "async_save": True,
+                "fully_parallel_save": False,
+                "fully_parallel_load": False,
+                "load_rng": True,
+            },
+        )
+
+        assert checkpoint_config.async_save is True
+        assert checkpoint_config.fully_parallel_save is False
+        assert checkpoint_config.fully_parallel_load is False
+        assert checkpoint_config.load_rng is True
+        # Non-configurable fields still set correctly
+        assert checkpoint_config.load_optim is True
+        assert checkpoint_config.save_interval == 100
+
+    def test_backward_compatible_positional_args(self, tmp_path):
+        """Test that the function is backward compatible with positional arguments."""
+        from nemo_rl.models.megatron.setup import _create_checkpoint_config
+
+        # Old-style call with only positional args still works
+        checkpoint_config = _create_checkpoint_config(
+            str(tmp_path / "pretrained"),
+            str(tmp_path / "weights"),
+            str(tmp_path / "optimizer"),
+        )
+
+        assert checkpoint_config.save == str(tmp_path / "weights")
+        assert checkpoint_config.load == str(tmp_path / "weights")
+        assert checkpoint_config.load_optim is True
+
+
+@pytest.mark.mcore
+class TestSetupDistributedTimeout:
+    """Tests for setup_distributed timeout configuration."""
+
+    @patch("nemo_rl.models.megatron.setup.torch.distributed.init_process_group")
+    @patch("nemo_rl.models.megatron.setup.destroy_parallel_state")
+    @patch("nemo_rl.models.megatron.setup.configure_dynamo_cache")
+    def test_default_timeout_no_config(
+        self, mock_cache, mock_destroy, mock_init_pg
+    ):
+        """Test that default 10-minute timeout is used when no config is passed."""
+        from datetime import timedelta
+
+        from nemo_rl.models.megatron.setup import setup_distributed
+
+        setup_distributed()
+
+        mock_init_pg.assert_called_once_with(
+            "nccl",
+            timeout=timedelta(minutes=10),
+        )
+
+    @patch("nemo_rl.models.megatron.setup.torch.distributed.init_process_group")
+    @patch("nemo_rl.models.megatron.setup.destroy_parallel_state")
+    @patch("nemo_rl.models.megatron.setup.configure_dynamo_cache")
+    def test_default_timeout_with_empty_megatron_cfg(
+        self, mock_cache, mock_destroy, mock_init_pg
+    ):
+        """Test default timeout when megatron_cfg has no distributed_timeout_minutes."""
+        from datetime import timedelta
+
+        from nemo_rl.models.megatron.setup import setup_distributed
+
+        config = {"megatron_cfg": {}}
+        setup_distributed(config=config)
+
+        mock_init_pg.assert_called_once_with(
+            "nccl",
+            timeout=timedelta(minutes=10),
+        )
+
+    @patch("nemo_rl.models.megatron.setup.torch.distributed.init_process_group")
+    @patch("nemo_rl.models.megatron.setup.destroy_parallel_state")
+    @patch("nemo_rl.models.megatron.setup.configure_dynamo_cache")
+    def test_custom_timeout(self, mock_cache, mock_destroy, mock_init_pg):
+        """Test that timeout can be overridden via config."""
+        from datetime import timedelta
+
+        from nemo_rl.models.megatron.setup import setup_distributed
+
+        config = {"megatron_cfg": {"distributed_timeout_minutes": 30}}
+        setup_distributed(config=config)
+
+        mock_init_pg.assert_called_once_with(
+            "nccl",
+            timeout=timedelta(minutes=30),
+        )
