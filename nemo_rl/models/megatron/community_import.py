@@ -99,6 +99,13 @@ def import_model_from_hf_name(
 
         model_parallel_cuda_manual_seed(0)
 
+    # Dump parallel group membership once (for deadlock diagnosis)
+    try:
+        from nemo_rl.collective_trace import dump_parallel_groups
+        dump_parallel_groups()
+    except ImportError:
+        pass
+
     megatron_model = model_provider.provide_distributed_model(wrap_with_ddp=False)
 
     # The above parallelism settings are used to load the model in a distributed manner.
