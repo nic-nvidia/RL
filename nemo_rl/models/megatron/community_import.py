@@ -12,11 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import os
+from contextlib import contextmanager
 from typing import Any, Optional
 
+import torch.distributed as dist
 from megatron.bridge import AutoBridge
+
+
+@contextmanager
+def scoped_process_group(pg):
+    """Temporarily replace the default process group.
+
+    All torch.distributed collectives that don't pass group= will use `pg`
+    instead of the global default. This prevents deadlocks when the default PG
+    includes ranks that don't participate in the operation (e.g., vLLM inference
+    workers during checkpoint save/load).
+    """
+    from torch.distributed.distributed_c10d import _world
+
+    original = _world.default_pg
+    _world.default_pg = pg
+    try:
+        yield
+    finally:
+        _world.default_pg = original
 
 from nemo_rl.models.policy import MegatronConfig
 
@@ -108,20 +128,13 @@ def import_model_from_hf_name(
     config.num_layers_in_last_pipeline_stage = orig_num_layers_in_last_pipeline_stage
     config.pipeline_dtype = orig_pipeline_dtype
 
-    # Disable save optimizations that deadlock when the distributed world includes
-    # non-training ranks (e.g., non-colocated vLLM workers):
-    # - fully_parallel_save=False: bypasses FullyParallelSaveStrategyWrapper which
-    #   calls all_gather_object on DP sub-groups containing non-participating ranks
-    # - validate_access_integrity=False: skips determine_global_metadata which calls
-    #   all_gather_object on the default PG where some ranks may not participate
-    # Conditional for backward compat with older Megatron-Bridge versions.
-    save_kwargs = {}
-    sig = inspect.signature(bridge.save_megatron_model)
-    if "fully_parallel_save" in sig.parameters:
-        save_kwargs["fully_parallel_save"] = False
-    if "validate_access_integrity" in sig.parameters:
-        save_kwargs["validate_access_integrity"] = False
-    bridge.save_megatron_model(megatron_model, output_path, **save_kwargs)
+    # Scope all collectives to the training-only process group during save.
+    # The default PG may include non-training ranks (e.g., vLLM inference workers)
+    # that don't participate in checkpoint operations, causing deadlocks in
+    # barriers, all_gather_object, etc. throughout the save path.
+    training_pg = parallel_state.get_data_parallel_group(with_context_parallel=True)
+    with scoped_process_group(training_pg):
+        bridge.save_megatron_model(megatron_model, output_path)
 
     # resetting mcore state
     import megatron.core.rerun_state_machine
